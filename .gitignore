@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+credentials.json
+help_counter.xlsx
+orders.db
+logs/*.log
+images/*
+!images/.gitkeep
+.venv/
+venv/
+*.egg-info/

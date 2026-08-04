@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  help-counter-bot:
+    build: .
+    container_name: help-counter-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - ./orders.db:/app/orders.db
+      - ./logs:/app/logs
