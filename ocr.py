@@ -1,6 +1,7 @@
 """
-OCR модулі: скриншоттан мәтінді танып, заказ нөмірін бөліп алады.
-config.OCR_ENGINE арқылы "tesseract" немесе "easyocr" қозғалтқышы таңдалады.
+OCR модулі: скриншоттан мәтінді танып, заказ нөмірі мен пакет санын
+бөліп алады. config.OCR_ENGINE арқылы "tesseract" немесе "easyocr"
+қозғалтқышы таңдалады.
 
 Ескерту: OCR операциясы CPU-мен байланысты (blocking) болғандықтан,
 event loop бұғатталмас үшін барлық шақырулар asyncio.to_thread ішінде
@@ -10,12 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 from PIL import Image
 
 from config import OCR_ENGINE, OCR_LANGUAGES, TESSERACT_CMD
-from utils import extract_order_number
+from utils import extract_order_number, extract_package_count
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +76,24 @@ def _run_ocr_sync(image_path: str) -> str:
 async def recognize_order_number(image_path: str) -> Optional[str]:
     """Суреттегі мәтінді таниды және заказ нөмірін қайтарады.
 
+    Ескі функционалдылықпен үйлесімділік үшін қалдырылды.
+    """
+    order_number, _ = await recognize_order_and_packages(image_path)
+    return order_number
+
+
+async def recognize_order_and_packages(image_path: str) -> Tuple[Optional[str], Optional[int]]:
+    """Суреттегі мәтінді таниды, заказ нөмірі мен пакет санын қайтарады.
+
     Args:
         image_path: Дискідегі скриншот суретінің жолы.
 
     Returns:
-        Табылған заказ нөмірі немесе табылмаса None.
+        (order_number, package_count) — екеуі де табылмаса None болуы мүмкін.
     """
     text = await asyncio.to_thread(_run_ocr_sync, image_path)
     order_number = extract_order_number(text)
+    package_count = extract_package_count(text)
 
     if order_number:
         logger.info("Заказ нөмірі табылды: %s", order_number)
@@ -94,4 +105,9 @@ async def recognize_order_number(image_path: str) -> Optional[str]:
             preview,
         )
 
-    return order_number
+    if package_count is not None:
+        logger.info("Пакет саны табылды: %s", package_count)
+    else:
+        logger.warning("Пакет саны табылмады — тапсырыс автоматты режимде өңделеді.")
+
+    return order_number, package_count
