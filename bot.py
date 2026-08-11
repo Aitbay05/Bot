@@ -309,6 +309,24 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     await message.reply_text(reply)
 
+async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Диспетчер режимінен шығу."""
+    chat_id = update.effective_chat.id
+
+    dispatcher_chat_ids = await database.get_dispatcher_chat_ids()
+
+    if chat_id not in dispatcher_chat_ids:
+        await update.message.reply_text(
+            "ℹ️ Сіз қазір диспетчер ретінде тіркелмегенсіз."
+        )
+        return
+
+    await database.remove_dispatcher(chat_id)
+
+    await update.message.reply_text(
+        "🚪 Диспетчер режимінен шықтыңыз.\n\n"
+        "Қайта кіру үшін /admin командасын пайдаланыңыз."
+    )
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Диспетчерге күтудегі барлық тапсырыстарды Қабылдау/Қайтару батырмаларымен көрсетеді.
@@ -460,6 +478,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("top5", top5_command))
     application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("logout", logout_command))
 
     admin_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_start)],

@@ -169,3 +169,14 @@ async def get_dispatcher_chat_ids() -> List[int]:
         cursor = await db.execute("SELECT chat_id FROM dispatchers")
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
+
+async def remove_dispatcher(chat_id: int) -> None:
+    """Чатты диспетчерлер тізімінен шығарады."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM dispatchers WHERE chat_id = ?",
+            (chat_id,),
+        )
+        await db.commit()
+
+    logger.info("Диспетчер чаты тіркеуден шығарылды: %s", chat_id)
