@@ -215,25 +215,25 @@ async def _notify_dispatchers_auto_warning(
     employee_name: str,
     package_count: int | None,
 ) -> bool:
-    """Үлкен заказ автоматты қабылданғаны туралы диспетчерге ескерту жібереді."""
+    """Отправляет уведомление диспетчеру о автоматически принятом большом заказе."""
     dispatcher_chat_ids = await database.get_dispatcher_chat_ids()
 
     if not dispatcher_chat_ids:
         logger.warning(
-            "Диспетчер чаты тіркелмеген — автоматты қабылданған "
-            "заказ №%s туралы ескерту жіберілмеді.",
+            "Чат диспетчера не зарегистрирован — уведомление "
+            "об автоматически принятом заказе №%s не отправлено.",
             order_number,
         )
         return False
 
     text = (
-        "🔔 ҮЛКЕН ЗАКАЗ — АВТОМАТТЫ ҚАБЫЛДАНДЫ\n\n"
-        f"👤 {employee_name}\n"
-        f"📦 Заказ №{order_number}\n"
-        f"📦 Количество пакетов: {package_count}\n\n"
-        "✅ Заказ автоматты түрде Google Таблицаға тіркелді.\n"
-        "ℹ️ Диспетчердің қабылдау/қайтару батырмасын басуы қажет емес."
-    )
+    "🔔 БОЛЬШОЙ ЗАКАЗ — АВТОМАТИЧЕСКИ ПРИНЯТ\n\n"
+    f"👤 Сотрудник: {employee_name}\n"
+    f"📦 Заказ №{order_number}\n"
+    f"📦 Количество пакетов: {package_count}\n\n"
+    "✅ Заказ автоматически зарегистрирован в Google Таблице.\n"
+    "ℹ️ Диспетчеру не нужно нажимать кнопки «Принять» / «Вернуть»."
+)
 
     sent_to_at_least_one = False
     for chat_id in dispatcher_chat_ids:
@@ -242,7 +242,7 @@ async def _notify_dispatchers_auto_warning(
             sent_to_at_least_one = True
         except Exception:
             logger.exception(
-                "Автоматты заказ туралы диспетчерге ескерту жіберу қатесі (chat_id=%s)",
+                "Ошибка при отправке уведомления диспетчеру о автоматически принятом заказе (chat_id=%s)",
                 chat_id,
             )
 
