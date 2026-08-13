@@ -62,7 +62,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "который оказал помощь.\n\n"
         "Пример: Айтбай Рахымжан\n\n"
         f"📦 Если на скриншоте количество пакетов больше {MIN_PACKAGES_FOR_AUTO_ACCEPT}, "
-        "бот примет заказ автоматически. Если меньше — заказ будет отправлен "
+        "бот автоматически зарегистрирует заказ в таблице и отправит диспетчеру уведомление. "
+        f"Если количество пакетов меньше или равно {MIN_PACKAGES_FOR_AUTO_ACCEPT} — заказ будет отправлен "
         "диспетчеру и будет ждать его подтверждения.\n\n"
         "📊 Команды:\n"
         "/stats — рейтинг всех сотрудников\n"
@@ -208,6 +209,46 @@ async def _notify_dispatchers(
     return sent_to_at_least_one
 
 
+async def _notify_dispatchers_auto_warning(
+    context: ContextTypes.DEFAULT_TYPE,
+    order_number: str,
+    employee_name: str,
+    package_count: int | None,
+) -> bool:
+    """Үлкен заказ автоматты қабылданғаны туралы диспетчерге ескерту жібереді."""
+    dispatcher_chat_ids = await database.get_dispatcher_chat_ids()
+
+    if not dispatcher_chat_ids:
+        logger.warning(
+            "Диспетчер чаты тіркелмеген — автоматты қабылданған "
+            "заказ №%s туралы ескерту жіберілмеді.",
+            order_number,
+        )
+        return False
+
+    text = (
+        "🔔 ҮЛКЕН ЗАКАЗ — АВТОМАТТЫ ҚАБЫЛДАНДЫ\n\n"
+        f"👤 {employee_name}\n"
+        f"📦 Заказ №{order_number}\n"
+        f"📦 Количество пакетов: {package_count}\n\n"
+        "✅ Заказ автоматты түрде Google Таблицаға тіркелді.\n"
+        "ℹ️ Диспетчердің қабылдау/қайтару батырмасын басуы қажет емес."
+    )
+
+    sent_to_at_least_one = False
+    for chat_id in dispatcher_chat_ids:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            sent_to_at_least_one = True
+        except Exception:
+            logger.exception(
+                "Автоматты заказ туралы диспетчерге ескерту жіберу қатесі (chat_id=%s)",
+                chat_id,
+            )
+
+    return sent_to_at_least_one
+
+
 async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выполняет основную логику при получении скриншота:
     OCR → проверка дубликата → (в зависимости от количества пакетов)
@@ -292,7 +333,7 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         return
 
-    # --- Автоматическое принятие (пакетов достаточно или не определено) ---
+    # --- Автоматическое принятие ---
     try:
         total_count = await google_sheet.add_help_record(employee_name, order_number)
         await database.save_order(order_number, employee_name, format_timestamp())
@@ -301,10 +342,21 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text("⚠️ Ошибка сервера. Попробуйте позже.")
         return
 
+    # Заказы больше 5 пакетов автоматически принимаются,
+    # но диспетчер получает уведомление для контроля.
+    if package_count is not None and package_count > MIN_PACKAGES_FOR_AUTO_ACCEPT:
+        await _notify_dispatchers_auto_warning(
+            context,
+            order_number,
+            employee_name,
+            package_count,
+        )
+
     reply = (
         "✅ Помощь зарегистрирована\n\n"
         f"👤 {employee_name}\n"
         f"📦 Заказ №{order_number}\n"
+        f"📦 Количество пакетов: {package_count if package_count is not None else 'неизвестно'}\n"
         f"📊 Общее количество оказанной помощи: {total_count}"
     )
     await message.reply_text(reply)
