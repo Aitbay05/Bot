@@ -1,6 +1,6 @@
 """
-Config modulі: барлық орта айнымалыларын (environment variables) жүктейді
-және логтауды баптайды.
+Модуль конфигурации: загружает все переменные окружения (environment variables)
+и настраивает логирование.
 """
 import logging
 from pathlib import Path
@@ -15,38 +15,38 @@ BASE_DIR = Path(__file__).resolve().parent
 # --- Telegram ---
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 
-# --- Google Sheets (мәліметтер осында сақталады) ---
-# Service Account JSON кілт файлының жолы (Google Cloud Console-дан алынады).
+# --- Google Sheets (данные хранятся здесь) ---
+# Путь к JSON-файлу ключа Service Account (получается в Google Cloud Console).
 GOOGLE_CREDENTIALS_PATH: str = os.getenv(
     "GOOGLE_CREDENTIALS_PATH", str(BASE_DIR / "credentials.json")
 )
-# Таблица URL-і: https://docs.google.com/spreadsheets/d/<ОСЫ_ЖЕР>/edit
+# URL таблицы: https://docs.google.com/spreadsheets/d/<ЭТА_ЧАСТЬ>/edit
 GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "")
-# Таблицаның ішіндегі парақ (лист) атауы
+# Название листа внутри таблицы
 GOOGLE_SHEET_NAME: str = os.getenv("GOOGLE_SHEET_NAME", "Sheet1")
 
 # --- OCR ---
-# "tesseract" немесе "easyocr"
+# "tesseract" или "easyocr"
 OCR_ENGINE: str = os.getenv("OCR_ENGINE", "tesseract")
 OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "rus+eng")
-# Windows-та tesseract.exe PATH-та болмауы мүмкін — сол кезде оның толық
-# жолын осында көрсетуге болады, мысалы:
+# На Windows tesseract.exe может отсутствовать в PATH — в этом случае
+# укажите здесь полный путь к нему, например:
 # TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 TESSERACT_CMD: str = os.getenv("TESSERACT_CMD", "")
 
-# --- Database ---
+# --- База данных ---
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", str(BASE_DIR / "orders.db"))
 
-# --- Диспетчер / админ ---
-# /admin командасы арқылы кіру үшін логин мен пароль.
+# --- Диспетчер / администратор ---
+# Логин и пароль для входа через команду /admin.
 ADMIN_LOGIN: str = os.getenv("ADMIN_LOGIN", "")
 ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
-# Осы саннан КОП пакет болса — автоматты қабылданады.
-# Осы санға ТЕҢ немесе одан АЗ болса — диспетчерге жіберіледі.
+# Если пакетов БОЛЬШЕ этого числа — заказ принимается автоматически.
+# Если РАВНО или МЕНЬШЕ этого числа — заказ отправляется диспетчеру.
 MIN_PACKAGES_FOR_AUTO_ACCEPT: int = int(os.getenv("MIN_PACKAGES_FOR_AUTO_ACCEPT", "5"))
 
-# --- Logging ---
+# --- Логирование ---
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -54,7 +54,7 @@ LOG_FILE = LOG_DIR / "bot.log"
 
 
 def setup_logging() -> None:
-    """Логтауды консольге және файлға бір мезгілде жазатындай баптайды."""
+    """Настраивает логирование одновременно в консоль и в файл."""
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -63,13 +63,13 @@ def setup_logging() -> None:
             logging.FileHandler(LOG_FILE, encoding="utf-8"),
         ],
     )
-    # Сыртқы кітапханалардың тым көп ақпарат беруін болдырмау
+    # Чтобы сторонние библиотеки не выдавали слишком много информации
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def validate_config() -> None:
-    """Міндетті айнымалылар бар-жоғын тексереді, жоқ болса қатемен тоқтайды."""
+    """Проверяет наличие обязательных переменных, при отсутствии — останавливается с ошибкой."""
     missing = []
     if not BOT_TOKEN:
         missing.append("BOT_TOKEN")
@@ -77,20 +77,20 @@ def validate_config() -> None:
         missing.append("GOOGLE_SHEET_ID")
     if missing:
         raise RuntimeError(
-            f".env файлында келесі айнымалылар толтырылмаған: {', '.join(missing)}"
+            f"В файле .env не заполнены следующие переменные: {', '.join(missing)}"
         )
 
     if not os.path.exists(GOOGLE_CREDENTIALS_PATH):
         raise RuntimeError(
-            f"Google Service Account кілт файлы табылмады: {GOOGLE_CREDENTIALS_PATH}\n"
-            "GOOGLE_CREDENTIALS_PATH дұрыс жолды көрсетіп тұрғанын тексеріңіз."
+            f"Файл ключа Google Service Account не найден: {GOOGLE_CREDENTIALS_PATH}\n"
+            "Проверьте, что GOOGLE_CREDENTIALS_PATH указывает на правильный путь."
         )
 
-    # ADMIN_LOGIN/ADMIN_PASSWORD міндетті емес, бірақ болмаса /admin
-    # командасы ешқашан сәтті болмайды — сондықтан тек ескерту береміз.
+    # ADMIN_LOGIN/ADMIN_PASSWORD не обязательны, но без них команда /admin
+    # никогда не сработает успешно — поэтому просто выводим предупреждение.
     logger = logging.getLogger(__name__)
     if not ADMIN_LOGIN or not ADMIN_PASSWORD:
         logger.warning(
-            "ADMIN_LOGIN немесе ADMIN_PASSWORD орнатылмаған — /admin командасы "
-            "арқылы диспетчер тіркеу мүмкін болмайды."
+            "ADMIN_LOGIN или ADMIN_PASSWORD не установлены — регистрация диспетчера "
+            "через команду /admin будет невозможна."
         )

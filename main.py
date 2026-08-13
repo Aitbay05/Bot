@@ -1,7 +1,7 @@
 """
-Жобаның кіру нүктесі (entry point).
+Точка входа в проект (entry point).
 
-Іске қосу: python main.py
+Запуск: python main.py
 """
 import logging
 
@@ -17,16 +17,16 @@ def main() -> None:
     setup_logging()
     validate_config()
 
-    # database.init_db() bot.py ішіндегі post_init хугінде
-    # (PTB-дің өз event loop-ында) шақырылады.
+    # database.init_db() вызывается в хуке post_init внутри bot.py
+    # (в собственном event loop PTB).
     application = build_application()
 
-    logger.info("Bot іске қосылды. Polling режимінде жұмыс істеп жатыр...")
-    # МАҢЫЗДЫ: allowed_updates=["message"] тек мәтін/фото хабарламаларын
-    # қабылдайды, ал inline батырма басу (callback_query) осында ЖОҚ
-    # болғандықтан "Қабылдау"/"Қайтару" батырмалары мүлдем іске қосылмай,
-    # шексіз "жүктелуде" күйінде қалып қоятын еді. Update.ALL_TYPES
-    # арқылы barлық update түрлерін (соның ішінде callback_query) қабылдаймыз.
+    logger.info("Бот запущен. Работает в режиме polling...")
+    # ВАЖНО: allowed_updates=["message"] принимает только текстовые/фото
+    # сообщения, а нажатие inline-кнопок (callback_query) сюда НЕ входит —
+    # поэтому кнопки "Принять"/"Вернуть" вообще не работали бы и
+    # оставались в бесконечном состоянии "загрузка". Через Update.ALL_TYPES
+    # принимаем ВСЕ типы обновлений (включая callback_query).
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
