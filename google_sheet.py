@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import List, Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 from config import GOOGLE_CREDENTIALS_PATH, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME
 from utils import format_timestamp
@@ -31,6 +33,10 @@ _lock = asyncio.Lock()
 
 # Кэшируем клиент gspread и worksheet, чтобы не открывать их заново каждый раз
 _worksheet = None
+
+# --- Retry-настройки для временных сбоев Google API (429/5xx/сетевые ошибки) ---
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE_SECONDS = 1.5
 
 
 def _get_worksheet():
@@ -67,6 +73,43 @@ def _get_worksheet():
     return _worksheet
 
 
+def _is_retryable_api_error(exc: Exception) -> bool:
+    """429 (rate limit) және 5xx (уақытша сервер қатесі) қайталауға жарамды деп есептейміз."""
+    if not isinstance(exc, APIError):
+        return False
+    try:
+        status = exc.response.status_code
+    except Exception:
+        return False
+    return status == 429 or 500 <= status < 600
+
+
+def _with_retry(func, *args, **kwargs):
+    """Google Sheets API-ды уақытша (429/5xx) қателерде exponential backoff-пен қайта шақырады.
+
+    Бұрын кез келген желілік ақау немесе rate-limit бірден exception
+    ретінде bot.py-ге дейін көтеріліп, пайдаланушыға "сервер қатесі"
+    ретінде көрінетін. Енді уақытша қателер бірнеше рет қайталанып
+    көрінеді, тек содан кейін ғана қате көтеріледі.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return func(*args, **kwargs)
+        except APIError as exc:
+            last_exc = exc
+            if not _is_retryable_api_error(exc) or attempt == _MAX_RETRIES:
+                raise
+            delay = _RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "Google Sheets API уақытша қате қайтарды (талпыныс %s/%s), %.1f секундтан кейін қайталаймыз: %s",
+                attempt, _MAX_RETRIES, delay, exc,
+            )
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+
+
 def _find_row_by_name_sync(ws, name: str) -> Optional[int]:
     """Сравнивает ФИО без учёта лишних пробелов и регистра букв."""
     target = name.strip().casefold()
@@ -80,16 +123,16 @@ def _find_row_by_name_sync(ws, name: str) -> Optional[int]:
 def _add_help_record_sync(name: str, order_number: str) -> int:
     """Обновляет Google Sheets, возвращает новое общее количество помощи."""
     ws = _get_worksheet()
-    row = _find_row_by_name_sync(ws, name)
+    row = _with_retry(_find_row_by_name_sync, ws, name)
     timestamp = format_timestamp()
 
     if row is None:
-        ws.append_row([name, 1, order_number, order_number, timestamp])
+        _with_retry(ws.append_row, [name, 1, order_number, order_number, timestamp])
         logger.info("Добавлен новый сотрудник: %s", name)
         return 1
 
-    current_count = ws.cell(row, 2).value or 0
-    current_orders = ws.cell(row, 3).value or ""
+    current_count = _with_retry(ws.cell, row, 2).value or 0
+    current_orders = _with_retry(ws.cell, row, 3).value or ""
 
     try:
         new_count = int(current_count) + 1
@@ -102,13 +145,13 @@ def _add_help_record_sync(name: str, order_number: str) -> int:
     new_orders = f"{current_orders}, {order_number}" if current_orders else order_number
 
     # Обновляем колонки B,C,D,E одним запросом (чтобы сэкономить лимит API)
-    ws.update(f"B{row}:E{row}", [[new_count, new_orders, order_number, timestamp]])
+    _with_retry(ws.update, f"B{row}:E{row}", [[new_count, new_orders, order_number, timestamp]])
     return new_count
 
 
 def _get_all_employees_sync() -> List[dict]:
     ws = _get_worksheet()
-    rows = ws.get_all_values()[1:]  # убираем заголовок
+    rows = _with_retry(ws.get_all_values)[1:]  # убираем заголовок
     employees = []
     for row in rows:
         if not row or not row[0]:
@@ -127,7 +170,11 @@ async def add_help_record(name: str, order_number: str) -> int:
     """Добавляет новую запись о помощи в Google Sheets, возвращает общее количество.
 
     Поскольку gspread — синхронная библиотека, вызов выполняется внутри
-    asyncio.to_thread.
+    asyncio.to_thread. _lock гарантирует, что внутри ЭТОГО процесса
+    операции записи не пересекаются (защита от lost update при двух
+    почти одновременных заказах). Если бот когда-нибудь будет запущен
+    в нескольких процессах одновременно — этой блокировки уже
+    недостаточно, потребуется внешняя блокировка (например, через БД).
     """
     async with _lock:
         return await asyncio.to_thread(_add_help_record_sync, name, order_number)

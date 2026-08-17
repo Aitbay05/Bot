@@ -1,0 +1,18 @@
+# Құпия деректер мен қажетсіз файлдардың Docker image ішіне түсуін болдырмау
+.env
+credentials.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+logs/*.log
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.venv/
+venv/
+tests/
+AUDIT_REPORT.md
+README.md

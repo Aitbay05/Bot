@@ -1,0 +1,11 @@
+# EasyOCR — Tesseract-тың орнына қолданғыңыз келсе ғана орнатыңыз
+# (OCR_ENGINE=easyocr). Бұл torch/torchvision әкеледі — жүктеу көлемі
+# ~2GB дейін жетеді, сондықтан негізгі requirements.txt-тен бөлек
+# ұсталады. Орнату:
+#
+#   pip install -r requirements.txt -r requirements-easyocr.txt
+#
+-r requirements.txt
+easyocr==1.7.1
+torch==2.3.1
+torchvision==0.18.1

@@ -2,20 +2,32 @@
 Обработчики Telegram-бота: команды /start, /help, /stats, /top5, /admin
 и обработка сообщений, приходящих в виде скриншота + ФИО (в подписи).
 
-Новая логика:
+Логика:
 - Если на скриншоте указано количество пакетов:
     * если оно БОЛЬШЕ MIN_PACKAGES_FOR_AUTO_ACCEPT -> заказ принимается автоматически;
     * если оно РАВНО или МЕНЬШЕ этого числа -> заказ отправляется в чат
       диспетчера, и до тех пор, пока диспетчер не нажмёт кнопку "Принять" /
       "Вернуть", заказ остаётся в статусе "в ожидании".
+    * если количество пакетов НЕ распознано (None) -> заказ ТАКЖЕ
+      отправляется диспетчеру (безопасный дефолт), а не принимается
+      автоматически "втихую". Раньше нераспознанный package_count
+      приводил к автоматическому принятию без единого уведомления
+      диспетчеру — это была логическая ошибка (см. AUDIT_REPORT.md,
+      пункт Critical/1).
 - Если через команду /admin введены верные логин/пароль, этот чат
-  регистрируется как чат диспетчера.
+  регистрируется как чат диспетчера. Неограниченное количество попыток
+  подряд запрещено простым in-memory ограничителем (см. _admin_attempts).
+- Кнопки "Принять"/"Вернуть" обрабатываются только если чат, откуда
+  пришёл callback, зарегистрирован как диспетчер — иначе запрос
+  игнорируется (авторизация).
 """
 from __future__ import annotations
 
 import logging
 import os
 import tempfile
+import time
+from collections import defaultdict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -33,12 +45,32 @@ import database
 import ocr
 import google_sheet
 from config import ADMIN_LOGIN, ADMIN_PASSWORD, BOT_TOKEN, MIN_PACKAGES_FOR_AUTO_ACCEPT
+from database import DuplicateOrderError
 from utils import clean_employee_name, format_timestamp
 
 logger = logging.getLogger(__name__)
 
 # Состояния диалога (conversation) для /admin
 ADMIN_LOGIN_STATE, ADMIN_PASSWORD_STATE = range(2)
+
+# --- Простая защита от подбора пароля /admin (brute force) ---
+# Не персистентная (сбрасывается при рестарте бота), но останавливает
+# автоматизированный перебор в рамках одной "жизни" процесса.
+_ADMIN_MAX_ATTEMPTS = 5
+_ADMIN_COOLDOWN_SECONDS = 15 * 60  # 15 минут
+_admin_attempts: dict[int, list[float]] = defaultdict(list)
+
+
+def _is_rate_limited(chat_id: int) -> bool:
+    now = time.monotonic()
+    attempts = _admin_attempts[chat_id]
+    # Тек соңғы cooldown уақыты ішіндегі әрекеттерді сақтаймыз
+    attempts[:] = [t for t in attempts if now - t < _ADMIN_COOLDOWN_SECONDS]
+    return len(attempts) >= _ADMIN_MAX_ATTEMPTS
+
+
+def _register_attempt(chat_id: int) -> None:
+    _admin_attempts[chat_id].append(time.monotonic())
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -63,7 +95,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Пример: Айтбай Рахымжан\n\n"
         f"📦 Если на скриншоте количество пакетов больше {MIN_PACKAGES_FOR_AUTO_ACCEPT}, "
         "бот автоматически зарегистрирует заказ в таблице и отправит диспетчеру уведомление. "
-        f"Если количество пакетов меньше или равно {MIN_PACKAGES_FOR_AUTO_ACCEPT} — заказ будет отправлен "
+        f"Если количество пакетов меньше или равно {MIN_PACKAGES_FOR_AUTO_ACCEPT}, а также если "
+        "количество пакетов не удалось распознать — заказ будет отправлен "
         "диспетчеру и будет ждать его подтверждения.\n\n"
         "📊 Команды:\n"
         "/stats — рейтинг всех сотрудников\n"
@@ -126,6 +159,14 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
+    chat_id = update.effective_chat.id
+    if _is_rate_limited(chat_id):
+        logger.warning("Слишком много попыток входа /admin из чата %s", chat_id)
+        await update.message.reply_text(
+            "⛔ Слишком много неудачных попыток входа. Попробуйте позже."
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text("🔐 Введите логин:")
     return ADMIN_LOGIN_STATE
 
@@ -139,15 +180,18 @@ async def admin_receive_login(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def admin_receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     login_attempt = context.user_data.pop("admin_login_attempt", "")
     password_attempt = update.message.text.strip()
+    chat_id = update.effective_chat.id
 
     if login_attempt == ADMIN_LOGIN and password_attempt == ADMIN_PASSWORD:
-        await database.add_dispatcher(update.effective_chat.id, format_timestamp())
+        await database.add_dispatcher(chat_id, format_timestamp())
         await update.message.reply_text(
             "✅ Вы зарегистрированы как диспетчер.\n"
             f"Теперь заказы с количеством пакетов меньше/равным {MIN_PACKAGES_FOR_AUTO_ACCEPT} "
             "будут приходить в этот чат."
         )
     else:
+        _register_attempt(chat_id)
+        logger.warning("Неудачная попытка входа /admin из чата %s", chat_id)
         await update.message.reply_text("⛔ Неверный логин или пароль.")
 
     return ConversationHandler.END
@@ -182,7 +226,7 @@ async def _notify_dispatchers(
         )
         return False
 
-    package_text = package_count if package_count is not None else "неизвестно"
+    package_text = package_count if package_count is not None else "не распознано"
     text = (
         "🕐 Новый заказ ожидает подтверждения\n\n"
         f"👤 {employee_name}\n"
@@ -227,13 +271,13 @@ async def _notify_dispatchers_auto_warning(
         return False
 
     text = (
-    "🔔 БОЛЬШОЙ ЗАКАЗ — АВТОМАТИЧЕСКИ ПРИНЯТ\n\n"
-    f"👤 Сотрудник: {employee_name}\n"
-    f"📦 Заказ №{order_number}\n"
-    f"📦 Количество пакетов: {package_count}\n\n"
-    "✅ Заказ автоматически зарегистрирован в Google Таблице.\n"
-    "ℹ️ Диспетчеру не нужно нажимать кнопки «Принять» / «Вернуть»."
-)
+        "🔔 БОЛЬШОЙ ЗАКАЗ — АВТОМАТИЧЕСКИ ПРИНЯТ\n\n"
+        f"👤 Сотрудник: {employee_name}\n"
+        f"📦 Заказ №{order_number}\n"
+        f"📦 Количество пакетов: {package_count}\n\n"
+        "✅ Заказ автоматически зарегистрирован в Google Таблице.\n"
+        "ℹ️ Диспетчеру не нужно нажимать кнопки «Принять» / «Вернуть»."
+    )
 
     sent_to_at_least_one = False
     for chat_id in dispatcher_chat_ids:
@@ -265,6 +309,11 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     employee_name = clean_employee_name(message.caption)
     if not employee_name:
         await message.reply_text("⚠️ ФИО указано неверно. Отправьте ещё раз.")
+        return
+    if len(employee_name) > 200:
+        # Кездейсоқ немесе әдейі жіберілген өте ұзын caption-ды
+        # деректер қорына жазбас бұрын кесіп тастаймыз.
+        await message.reply_text("⚠️ ФИО слишком длинное. Проверьте подпись и отправьте ещё раз.")
         return
 
     photo = message.photo[-1]  # самый большой размер
@@ -305,8 +354,14 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # --- Решение принимается на основе количества пакетов ---
+    # ВАЖНО: если package_count не распознан (None), заказ ТОЖЕ уходит
+    # диспетчеру, а не принимается автоматически. Раньше (баг) None
+    # интерпретировался как "пакетов много", и заказ регистрировался
+    # без единого уведомления — это позволяло случайно (или намеренно,
+    # если сотрудник пришлёт скриншот без секции "Пакеты") обойти
+    # проверку диспетчера.
     needs_dispatcher_approval = (
-        package_count is not None and package_count <= MIN_PACKAGES_FOR_AUTO_ACCEPT
+        package_count is None or package_count <= MIN_PACKAGES_FOR_AUTO_ACCEPT
     )
 
     if needs_dispatcher_approval:
@@ -314,15 +369,22 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await database.save_pending_order(
                 order_number, employee_name, message.chat_id, package_count, format_timestamp()
             )
+        except DuplicateOrderError:
+            await message.reply_text(
+                "⏳ Этот заказ уже был отправлен на рассмотрение (возможно, в тот же момент). "
+                "Повторно отправлять не нужно, подождите."
+            )
+            return
         except Exception:
             logger.exception("Ошибка при сохранении заказа в ожидании")
             await message.reply_text("⚠️ Ошибка сервера. Попробуйте позже.")
             return
 
+        package_display = package_count if package_count is not None else "не распознано"
         await message.reply_text(
             "⏳ Заказ отправлен диспетчеру, ожидается подтверждение.\n\n"
             f"📦 Заказ №{order_number}\n"
-            f"📦 Количество пакетов: {package_count}"
+            f"📦 Количество пакетов: {package_display}"
         )
         sent = await _notify_dispatchers(context, order_number, employee_name, package_count)
         if not sent:
@@ -333,10 +395,16 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         return
 
-    # --- Автоматическое принятие ---
+    # --- Автоматическое принятие (package_count > MIN_PACKAGES_FOR_AUTO_ACCEPT) ---
     try:
         total_count = await google_sheet.add_help_record(employee_name, order_number)
         await database.save_order(order_number, employee_name, format_timestamp())
+    except DuplicateOrderError:
+        # google_sheet-ке жазба әлдеқашан қосылып қойған болуы мүмкін,
+        # бірақ бұл — сирек кездесетін race condition, ал пайдаланушыға
+        # ешбір жағдайда "сервер қатесі" демей, дұрыс хабар береміз.
+        await message.reply_text("⚠️ Этот заказ уже был зарегистрирован (обработан параллельно).")
+        return
     except Exception:
         logger.exception("Ошибка при обновлении базы данных/Google Таблицы")
         await message.reply_text("⚠️ Ошибка сервера. Попробуйте позже.")
@@ -344,30 +412,23 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Заказы больше 5 пакетов автоматически принимаются,
     # но диспетчер получает уведомление для контроля.
-    if package_count is not None and package_count > MIN_PACKAGES_FOR_AUTO_ACCEPT:
-        await _notify_dispatchers_auto_warning(
-            context,
-            order_number,
-            employee_name,
-            package_count,
-        )
+    await _notify_dispatchers_auto_warning(context, order_number, employee_name, package_count)
 
     reply = (
         "✅ Помощь зарегистрирована\n\n"
         f"👤 {employee_name}\n"
         f"📦 Заказ №{order_number}\n"
-        f"📦 Количество пакетов: {package_count if package_count is not None else 'неизвестно'}\n"
+        f"📦 Количество пакетов: {package_count}\n"
         f"📊 Общее количество оказанной помощи: {total_count}"
     )
     await message.reply_text(reply)
+
 
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выход из режима диспетчера."""
     chat_id = update.effective_chat.id
 
-    dispatcher_chat_ids = await database.get_dispatcher_chat_ids()
-
-    if chat_id not in dispatcher_chat_ids:
+    if not await database.is_dispatcher(chat_id):
         await update.message.reply_text(
             "ℹ️ Сейчас вы не зарегистрированы как диспетчер."
         )
@@ -380,6 +441,7 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Чтобы войти снова, используйте команду /admin."
     )
 
+
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает диспетчеру все заказы в ожидании с кнопками Принять/Вернуть.
 
@@ -387,9 +449,8 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     сначала нужно зарегистрироваться через /admin.
     """
     chat_id = update.effective_chat.id
-    dispatcher_chat_ids = await database.get_dispatcher_chat_ids()
 
-    if chat_id not in dispatcher_chat_ids:
+    if not await database.is_dispatcher(chat_id):
         await update.message.reply_text(
             "⛔ Эта команда доступна только зарегистрированным диспетчерам.\n"
             "Сначала зарегистрируйтесь через команду /admin."
@@ -405,7 +466,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"🕐 Заказов в ожидании: {len(pending_orders)}")
 
     for order in pending_orders:
-        package_text = order["package_count"] if order["package_count"] is not None else "неизвестно"
+        package_text = order["package_count"] if order["package_count"] is not None else "не распознано"
         text = (
             "🕐 Заказ ожидает подтверждения\n\n"
             f"👤 {order['employee_name']}\n"
@@ -429,8 +490,28 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def dispatcher_decision_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Вызывается, когда диспетчер нажимает кнопку "Принять" или "Вернуть"."""
+    """Вызывается, когда диспетчер нажимает кнопку "Принять" или "Вернуть".
+
+    АВТОРИЗАЦИЯ: раньше эта функция обрабатывала callback от ЛЮБОГО
+    чата без проверки — то есть любой участник чата, куда бот отправил
+    сообщение (например, участник группы, где один человек когда-то
+    вводил /admin), мог нажать "Принять"/"Вернуть". Также, если
+    диспетчер вышел через /logout, старые сообщения с кнопками
+    оставались активными и callback всё ещё обрабатывался. Теперь чат
+    проверяется через database.is_dispatcher() перед любым действием.
+    """
     query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    if not await database.is_dispatcher(chat_id):
+        await query.answer(
+            "⛔ У вас нет прав диспетчера для этого действия.", show_alert=True
+        )
+        logger.warning(
+            "Попытка неавторизованного доступа к dispatcher callback из чата %s", chat_id
+        )
+        return
+
     await query.answer()
 
     try:
@@ -449,13 +530,34 @@ async def dispatcher_decision_callback(update: Update, context: ContextTypes.DEF
     employee_chat_id = pending["employee_chat_id"]
 
     if action == "approve":
+        # Алдымен статусты атомарлы түрде "pending" -> "accepted" етіп
+        # ауыстырамыз. Егер басқа диспетчер бұл заказды бір мезгілде
+        # өңдеп үлгерсе (updated=False), Google Sheets-ке қайта
+        # жазбаймыз — осылайша double-write болдырмаймыз.
+        updated = await database.update_pending_order_status(order_number, "accepted")
+        if not updated:
+            await query.edit_message_text("⚠️ Этот заказ уже обработан другим диспетчером.")
+            return
+
         try:
             total_count = await google_sheet.add_help_record(employee_name, order_number)
             await database.save_order(order_number, employee_name, format_timestamp())
-            await database.update_pending_order_status(order_number, "accepted")
+        except DuplicateOrderError:
+            await query.edit_message_text("⚠️ Этот заказ уже был зарегистрирован ранее.")
+            return
         except Exception:
             logger.exception("Ошибка при принятии заказа")
-            await query.edit_message_text("⚠️ Ошибка сервера. Попробуйте позже.")
+            # Статус "accepted" болып қалды, бірақ Sheets-ке жазылмады —
+            # мұны логта анық көрсетеміз, өйткені қолмен тексеру қажет.
+            logger.error(
+                "ВНИМАНИЕ: заказ №%s помечен как accepted в БД, но НЕ записан в Google Sheets "
+                "из-за ошибки. Требуется ручная проверка.",
+                order_number,
+            )
+            await query.edit_message_text(
+                "⚠️ Ошибка сервера при записи в таблицу. Обратитесь к администратору "
+                f"и сообщите номер заказа №{order_number}."
+            )
             return
 
         await query.edit_message_text(
@@ -475,11 +577,9 @@ async def dispatcher_decision_callback(update: Update, context: ContextTypes.DEF
             logger.exception("Ошибка при отправке сообщения сотруднику")
 
     elif action == "reject":
-        try:
-            await database.update_pending_order_status(order_number, "rejected")
-        except Exception:
-            logger.exception("Ошибка при возврате заказа")
-            await query.edit_message_text("⚠️ Ошибка сервера. Попробуйте позже.")
+        updated = await database.update_pending_order_status(order_number, "rejected")
+        if not updated:
+            await query.edit_message_text("⚠️ Этот заказ уже обработан другим диспетчером.")
             return
 
         await query.edit_message_text(
@@ -516,7 +616,7 @@ async def _post_init(application: Application) -> None:
     pending_orders, dispatchers). Поскольку используется
     CREATE TABLE IF NOT EXISTS, существующим данным (например, таблице
     orders) не наносится никакого вреда — добавляются только
-    недостающие таблицы.
+    недостающие таблицы и индексы.
     """
     await database.init_db()
 

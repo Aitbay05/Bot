@@ -2,12 +2,11 @@ python-telegram-bot==21.4
 gspread==6.1.4
 google-auth==2.35.0
 pillow==10.4.0
-pytesseract==0.3.13
-easyocr==1.7.1
 aiosqlite==0.20.0
 python-dotenv==1.0.1
-torch==2.3.1
-torchvision==0.18.1
+
+# Әдепкі OCR қозғалтқышы — Tesseract (жеңіл, жүйелік пакет ретінде орнатылады)
+pytesseract==0.3.13
 
 # Excel нұсқасын (excel_sheet.py) әлі де қолданғыңыз келсе қажет.
 # Google Sheets қолдансаңыз, бұл жол міндетті емес — алып тастауға болады.
