@@ -24,7 +24,7 @@ from utils import format_timestamp
 
 logger = logging.getLogger(__name__)
 
-HEADERS = ["ФИО", "Количество помощи", "Заказы", "Последний заказ", "Последнее обновление"]
+HEADERS = ["ФИО", "Количество помощи"]
 
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -67,6 +67,16 @@ def _get_worksheet():
     if first_row[: len(HEADERS)] != HEADERS:
         ws.update("A1", [HEADERS])
         logger.info("В таблицу записаны заголовки (headers)")
+
+    # Миграция: ескі нұсқада кестеде қосымша баған тақырыптары
+    # ("Заказы", "Последний заказ", "Последнее обновление") болуы мүмкін.
+    # Жаңа схема бойынша тек A/B бағандары қолданылады, сондықтан
+    # артық тақырыптарды тазалаймыз (деректің өзі жойылмайды, тек
+    # шатастыратын ескі баған атаулары өшіріледі).
+    if len(first_row) > len(HEADERS) and any(first_row[len(HEADERS):]):
+        clear_range = f"{chr(ord('A') + len(HEADERS))}1:{chr(ord('A') + len(first_row) - 1)}1"
+        ws.batch_clear([clear_range])
+        logger.info("Ескі қосымша баған тақырыптары тазаланды: %s", clear_range)
 
     _worksheet = ws
     logger.info("Google Sheets готов: sheet_id=%s, tab=%s", GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
@@ -121,18 +131,21 @@ def _find_row_by_name_sync(ws, name: str) -> Optional[int]:
 
 
 def _add_help_record_sync(name: str, order_number: str) -> int:
-    """Обновляет Google Sheets, возвращает новое общее количество помощи."""
+    """Обновляет Google Sheets, возвращает новое общее количество помощи.
+
+    Таблицада тек екі баған сақталады: ФИО және Количество помощи.
+    order_number/timestamp тек логқа және SQLite-ке (database.py) жазылады —
+    Google Таблицаны қарапайым және сұраныс бойынша (тек ФИО + сан) ұстау үшін.
+    """
     ws = _get_worksheet()
     row = _with_retry(_find_row_by_name_sync, ws, name)
-    timestamp = format_timestamp()
 
     if row is None:
-        _with_retry(ws.append_row, [name, 1, order_number, order_number, timestamp])
-        logger.info("Добавлен новый сотрудник: %s", name)
+        _with_retry(ws.append_row, [name, 1])
+        logger.info("Добавлен новый сотрудник: %s (заказ №%s)", name, order_number)
         return 1
 
     current_count = _with_retry(ws.cell, row, 2).value or 0
-    current_orders = _with_retry(ws.cell, row, 3).value or ""
 
     try:
         new_count = int(current_count) + 1
@@ -142,10 +155,8 @@ def _add_help_record_sync(name: str, order_number: str) -> int:
         )
         new_count = 1
 
-    new_orders = f"{current_orders}, {order_number}" if current_orders else order_number
-
-    # Обновляем колонки B,C,D,E одним запросом (чтобы сэкономить лимит API)
-    _with_retry(ws.update, f"B{row}:E{row}", [[new_count, new_orders, order_number, timestamp]])
+    _with_retry(ws.update_cell, row, 2, new_count)
+    logger.info("Количество помощи обновлено: %s -> %s (заказ №%s)", name, new_count, order_number)
     return new_count
 
 
