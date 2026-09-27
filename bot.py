@@ -46,6 +46,7 @@ from telegram.ext import (
 import database
 import ocr
 import google_sheet
+import monitoring
 from config import ADMIN_CHAT_IDS, BOT_TOKEN, MIN_PACKAGES_FOR_AUTO_ACCEPT
 from database import DuplicateOrderError
 from utils import clean_employee_name, format_timestamp
@@ -647,8 +648,12 @@ async def _post_init(application: Application) -> None:
     CREATE TABLE IF NOT EXISTS, существующим данным (например, таблице
     orders) не наносится никакого вреда — добавляются только
     недостающие таблицы и индексы.
+
+    Сондай-ақ монитoring startup-хабарламасы осы жерде жіберіледі —
+    Application толық дайын болғаннан кейін (bot instance жарамды).
     """
     await database.init_db()
+    await monitoring.send_startup_notification(application.bot)
 
 
 def build_application() -> Application:
@@ -673,5 +678,10 @@ def build_application() -> Application:
         MessageHandler(~filters.PHOTO & ~filters.COMMAND, handle_unsupported)
     )
 
+    # Monitoring: python-telegram-bot ұстамаған (unhandled) кез келген
+    # exception осы хендлерге келеді. monitoring.error_handler өзі
+    # ешқашан жаңа exception лақтырмайды (толық try/except-пен
+    # қоршалған), сондықтан негізгі бот жұмысына кедергі келтірмейді.
+    application.add_error_handler(monitoring.error_handler)
 
     return application
