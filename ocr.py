@@ -71,15 +71,50 @@ def _get_easyocr_reader():
     return _easyocr_reader
 
 
+# Telegram өзі фотоны қысып жібереді (әдетте ұзын жағы ~1280px-тен
+# аспайды), сондықтан нақты скриншот үшін бұл шек бос қалмайды. Мұны
+# нақты қоюдың себебі: PIL-дің өзінің әдепкі DecompressionBomb шегі
+# (~89 млн пиксель) бар болғанымен, ол "жасырын" әрі версиялар арасында
+# өзгеруі мүмкін — ал бұл жерде НАҚТЫ, біз бақылайтын шек қойылған,
+# сондықтан мінез-құлық болжамды әрі логта анық көрінеді.
+_MAX_IMAGE_PIXELS = 40_000_000  # ~40 мегапиксель — қалыпты телефон скриншотынан әлдеқайда көп
+
+
+def _open_image_with_size_guard(image_path: str) -> Image.Image:
+    """Суретті ашады, бірақ алдын ала өлшемін тексереді (жад/CPU қорғанысы).
+
+    PIL `Image.open` файлды лениво (lazy) ашады — пиксель деректері
+    бірден жадқа жүктелмейді, сондықтан `.size`-ды тексеру арзан операция.
+    Шектен асса, OCR мүлде жасалмайды (жады таусылу/өте баяу өңделу
+    қаупінен аулақ болу үшін) — функция ValueError лақтырады, оны
+    `_run_ocr_sync` сыртқы `except Exception` арқылы қауіпсіз ұстап,
+    бос мәтін қайтарады (бот құламайды, тек OCR нәтижесі табылмады
+    деп өңделеді).
+    """
+    image = Image.open(image_path)
+    width, height = image.size
+    pixel_count = width * height
+    if pixel_count > _MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"Сурет тым үлкен (({width}x{height}={pixel_count} пиксель), "
+            f"шек: {_MAX_IMAGE_PIXELS}) — OCR қауіпсіздік үшін өткізіп жіберілді"
+        )
+    return image
+
+
 def _ocr_tesseract(image_path: str) -> str:
     import pytesseract
 
     _configure_tesseract()
-    image = Image.open(image_path)
+    image = _open_image_with_size_guard(image_path)
     return pytesseract.image_to_string(image, lang=OCR_LANGUAGES)
 
 
 def _ocr_easyocr(image_path: str) -> str:
+    # EasyOCR файлды өзі оқиды (PIL арқылы бізден тәуелсіз), сондықтан
+    # алдын ала дәл сол шекті тексереміз — бірдей қорғаныс екі
+    # қозғалтқышқа да қолданылуы үшін.
+    _open_image_with_size_guard(image_path)
     reader = _get_easyocr_reader()
     results = reader.readtext(image_path, detail=0)
     return "\n".join(results)

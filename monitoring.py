@@ -21,13 +21,15 @@ Telegram арқылы автоматты хабарлама жіберу.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import traceback
 from typing import Optional
 
 from telegram import Bot
+from telegram.error import Conflict as TelegramConflict
 
-from config import ADMIN_CHAT_IDS
+from config import ADMIN_CHAT_IDS, BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,22 @@ async def send_startup_notification(bot: Bot) -> None:
         logger.exception("Monitoring: startup notification жіберу кезінде күтпеген қате")
 
 
+# Telegram bot-токенінің пішіні: "123456789:AA...35 таңба". Кейбір
+# telegram-ext қателерінің мәтінінде (мыс. желі/URL қатесі) осындай
+# жол кездейсоқ болуы мүмкін — мониторинг хабарламасы Telegram-ға
+# кетпес бұрын оны міндетті түрде жасырамыз. Толық (жасырылмаған)
+# traceback ӘРҚАШАН тек серверлік логта қалады, Telegram-ға ешқашан
+# жіберілмейді.
+_BOT_TOKEN_PATTERN = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,45}")
+
+
+def _redact_secrets(text: str) -> str:
+    if BOT_TOKEN:
+        text = text.replace(BOT_TOKEN, "[BOT_TOKEN REDACTED]")
+    text = _BOT_TOKEN_PATTERN.sub("[BOT_TOKEN REDACTED]", text)
+    return text
+
+
 def format_error_message(error_type: str, error_message: str, tb_text: str) -> str:
     excerpt = _format_traceback_excerpt(tb_text)
     text = (
@@ -132,6 +150,10 @@ def format_error_message(error_type: str, error_message: str, tb_text: str) -> s
         f"Ошибка:\n{error_message or '(пусто)'}\n\n"
         f"Traceback:\n{excerpt}"
     )
+    # Telegram-ға кетпес бұрын құпия ақпаратты (BOT_TOKEN және т.б.)
+    # жасырамыз — тіпті error message/traceback ішінде кездейсоқ
+    # кездессе де.
+    text = _redact_secrets(text)
     return _truncate(text)
 
 
@@ -158,6 +180,19 @@ async def error_handler(update: object, context) -> None:
     # Толық traceback ӘРҚАШАН серверлік логта сақталады (қысқартылмайды) —
     # Telegram-ға тек қысқа үзінді кетеді.
     logger.error("Unhandled exception (update=%r):\n%s", update, tb_text or error_message)
+
+    # "Conflict: terminated by other getUpdates request" production-та
+    # бұрын кездескен нақты оқиға — екі бот процесі бір token-мен бір
+    # мезгілде polling жасағанда шығады. main.py-дегі файл-құлып (single
+    # instance lock) бұл жағдайды алдын алады, бірақ желі/деплой кезінде
+    # сирек орын алуы мүмкін болғандықтан, мұны администраторға ӨЗГЕШЕ,
+    # түсінікті хабарламамен бөлек белгілейміз (жай "unhandled exception"
+    # емес — нақты не істеу керегін көрсетеміз).
+    if isinstance(error, TelegramConflict):
+        logger.critical(
+            "Telegram polling conflict: екінші бот процесі іске қосылған болуы мүмкін. "
+            "`ps aux | grep main.py` арқылы тексеріп, артық процесті тоқтатыңыз."
+        )
 
     try:
         key = _error_key(error_type, error_message)
