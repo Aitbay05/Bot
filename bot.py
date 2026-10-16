@@ -183,6 +183,20 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
 
+    # Диспетчерді ТЕК жеке (private) чатта тіркейміз. Себебі: авторизация
+    # chat_id бойынша тексеріледі (database.is_dispatcher(chat_id)), ал
+    # топтық/канал чатында chat_id сол топтың бүкіл мүшелеріне ортақ —
+    # яғни топта кез келген адам "Принять"/"Вернуть" батырмасын баса алар
+    # еді, тіпті ол ADMIN_CHAT_IDS-те жоқ болса да. Жеке чатта chat_id
+    # әрдайым сол нақты адамның Telegram ID-іне тең болғандықтан, бұл
+    # шектеу осы тарапты толық жабады.
+    if update.effective_chat.type != "private":
+        await update.message.reply_text(
+            "⛔ Диспетчер ретінде тек жеке чатта (боттың өзіне) тіркеле аласыз. "
+            "Топтық чатта емес — ботқа жеке хабарласып, осы жерде /admin жіберіңіз."
+        )
+        return
+
     if not ADMIN_CHAT_IDS:
         await update.message.reply_text(
             "⚠️ На сервере не настроен ADMIN_CHAT_IDS. Обратитесь к администратору."
@@ -224,6 +238,7 @@ async def _notify_dispatchers(
     order_number: str,
     employee_name: str,
     package_count: int | None,
+    order_number_confident: bool = True,
 ) -> bool:
     """Отправляет заказ во все зарегистрированные чаты диспетчеров с кнопками Принять/Вернуть.
 
@@ -241,11 +256,18 @@ async def _notify_dispatchers(
         return False
 
     package_text = package_count if package_count is not None else "не распознано"
+    confidence_note = (
+        "\n\n⚠️ Номер заказа распознан с низкой уверенностью (не найдено рядом "
+        "со словом «заказ»/«№»/«#») — пожалуйста, сверьте номер со скриншотом вручную."
+        if not order_number_confident
+        else ""
+    )
     text = (
         "🕐 Новый заказ ожидает подтверждения\n\n"
         f"👤 {employee_name}\n"
         f"📦 Заказ №{order_number}\n"
         f"📦 Количество пакетов: {package_text}"
+        f"{confidence_note}"
     )
     keyboard = InlineKeyboardMarkup(
         [
@@ -330,6 +352,15 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     автоматическое принятие или отправка диспетчеру.
     """
     message = update.message
+    if message is None:
+        # Production логта расталған қате: Telegram edited_message/channel_post
+        # сияқты update түрлерінде update.message = None болады, бірақ handler
+        # осы функцияға сол update-ті де жіберуі мүмкін еді (filters.PHOTO
+        # жаңа/өңделген хабарламаны ажыратпайды). Енді handler тіркеуінде
+        # filters.UpdateType.MESSAGE қосылды (тек жаңа хабарлама), бірақ осы
+        # жерде де қосымша сақтық ретінде тексереміз — бұл OCR қайта
+        # іске қосылмауын, демек сол заказдың қайта өңделмеуін қамтамасыз етеді.
+        return
 
     if not message.caption:
         await message.reply_text(
@@ -355,7 +386,9 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await tg_file.download_to_drive(image_path)
 
         try:
-            order_number, package_count = await ocr.recognize_order_and_packages(image_path)
+            order_number, package_count, order_number_confident = (
+                await ocr.recognize_order_and_packages(image_path)
+            )
         except Exception:
             logger.exception("Ошибка во время OCR")
             await message.reply_text("⚠️ Заказ не распознан.")
@@ -384,15 +417,24 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    # --- Решение принимается на основе количества пакетов ---
+    # --- Решение принимается на основе количества пакетов И уверенности в номере заказа ---
     # ВАЖНО: если package_count не распознан (None), заказ ТОЖЕ уходит
     # диспетчеру, а не принимается автоматически. Раньше (баг) None
     # интерпретировался как "пакетов много", и заказ регистрировался
     # без единого уведомления — это позволяло случайно (или намеренно,
     # если сотрудник пришлёт скриншот без секции "Пакеты") обойти
     # проверку диспетчера.
+    #
+    # Также: если номер заказа найден только как "случайная последовательность
+    # цифр" без явного слова-метки ("заказ"/"order"/"№"/"#"), это НИЗКАЯ
+    # уверенность (order_number_confident=False) — OCR мог перепутать номер
+    # заказа с каким-то другим числом на скриншоте (ценой, телефоном и т.п.).
+    # Такой заказ тоже отправляется диспетчеру на ручную проверку, даже если
+    # пакетов много.
     needs_dispatcher_approval = (
-        package_count is None or package_count <= MIN_PACKAGES_FOR_AUTO_ACCEPT
+        package_count is None
+        or package_count <= MIN_PACKAGES_FOR_AUTO_ACCEPT
+        or not order_number_confident
     )
 
     if needs_dispatcher_approval:
@@ -417,7 +459,9 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"📦 Заказ №{order_number}\n"
             f"📦 Количество пакетов: {package_display}"
         )
-        sent = await _notify_dispatchers(context, order_number, employee_name, package_count)
+        sent = await _notify_dispatchers(
+            context, order_number, employee_name, package_count, order_number_confident
+        )
         if not sent:
             await message.reply_text(
                 "⚠️ Внимание: сейчас нет зарегистрированного диспетчера, поэтому "
@@ -427,18 +471,55 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # --- Автоматическое принятие (package_count > MIN_PACKAGES_FOR_AUTO_ACCEPT) ---
+    # ВАЖНО (порядок операций): сначала SQLite (database.save_order), и
+    # только потом Google Sheets (google_sheet.add_help_record). Раньше
+    # порядок был обратным — это создавало риск двойного учёта: если
+    # запись в Sheets проходила успешно, а следующий за ней save_order
+    # падал (например, из-за редкой гонки или временной ошибки БД), заказ
+    # физически НЕ попадал в таблицу orders (order_exists() вернул бы
+    # False), и при повторной отправке того же скриншота сотрудником бот
+    # обработал бы его ЕЩЁ РАЗ как новый — с повторным увеличением счётчика
+    # в Google Sheets. database.save_order имеет UNIQUE-ограничение на
+    # order_number, поэтому если он выполнен первым, любой повтор для того
+    # же заказа гарантированно отклоняется ДО того, как Sheets будет
+    # тронута повторно.
     try:
-        total_count = await google_sheet.add_help_record(employee_name, order_number)
         await database.save_order(order_number, employee_name, format_timestamp())
     except DuplicateOrderError:
-        # google_sheet-ке жазба әлдеқашан қосылып қойған болуы мүмкін,
-        # бірақ бұл — сирек кездесетін race condition, ал пайдаланушыға
-        # ешбір жағдайда "сервер қатесі" демей, дұрыс хабар береміз.
         await message.reply_text("⚠️ Этот заказ уже был зарегистрирован (обработан параллельно).")
         return
     except Exception:
-        logger.exception("Ошибка при обновлении базы данных/Google Таблицы")
+        logger.exception("Ошибка при обновлении базы данных")
         await message.reply_text("⚠️ Ошибка сервера. Попробуйте позже.")
+        return
+
+    try:
+        total_count = await google_sheet.add_help_record(employee_name, order_number)
+    except Exception:
+        # БД уже подтвердила этот заказ как новый и уникальный (защита от
+        # повторной обработки обеспечена), но запись в Google Таблицу не
+        # удалась — сообщаем администраторам, чтобы это можно было
+        # исправить вручную, вместо того чтобы молча потерять запись.
+        logger.exception(
+            "ВНИМАНИЕ: заказ №%s сохранён в БД, но НЕ записан в Google Sheets "
+            "из-за ошибки. Требуется ручная проверка.",
+            order_number,
+        )
+        try:
+            await monitoring.notify_admins(
+                context.bot,
+                "🟠 Help Counter Bot — Google Sheets жазылмады\n\n"
+                f"Қызметкер: {employee_name}\n"
+                f"Заказ №{order_number}\n\n"
+                "Дерекқорда сақталды, бірақ Google Таблицаға жазылмады. "
+                "Қолмен тексеріп, керек болса қолмен қосыңыз.",
+            )
+        except Exception:
+            logger.exception("Monitoring: Google Sheets қатесі туралы хабарлау сәтсіз аяқталды")
+        await message.reply_text(
+            "✅ Заказ учтён в системе, но не удалось обновить Google Таблицу. "
+            "Администратор уведомлён и проверит вручную."
+        )
         return
 
     # Заказы больше 5 пакетов автоматически принимаются,
@@ -570,21 +651,46 @@ async def dispatcher_decision_callback(update: Update, context: ContextTypes.DEF
             await query.edit_message_text("⚠️ Этот заказ уже обработан другим диспетчером.")
             return
 
+        # ВАЖНО (порядок операций): database.save_order (SQLite, с UNIQUE
+        # на order_number) вызывается ПЕРВЫМ, google_sheet.add_help_record —
+        # ВТОРЫМ. Причина та же, что и в handle_screenshot: если Sheets
+        # обновится первой, а последующая запись в БД упадёт, заказ не
+        # будет считаться "существующим" при повторной обработке — и
+        # счётчик в Sheets можно будет увеличить повторно.
         try:
-            total_count = await google_sheet.add_help_record(employee_name, order_number)
             await database.save_order(order_number, employee_name, format_timestamp())
         except DuplicateOrderError:
             await query.edit_message_text("⚠️ Этот заказ уже был зарегистрирован ранее.")
             return
         except Exception:
-            logger.exception("Ошибка при принятии заказа")
-            # Статус "accepted" болып қалды, бірақ Sheets-ке жазылмады —
-            # мұны логта анық көрсетеміз, өйткені қолмен тексеру қажет.
-            logger.error(
-                "ВНИМАНИЕ: заказ №%s помечен как accepted в БД, но НЕ записан в Google Sheets "
+            logger.exception("Ошибка при сохранении заказа в базу данных")
+            await query.edit_message_text(
+                "⚠️ Ошибка сервера при сохранении заказа. Попробуйте нажать «Принять» ещё раз."
+            )
+            return
+
+        try:
+            total_count = await google_sheet.add_help_record(employee_name, order_number)
+        except Exception:
+            # Статус "accepted" болып қалды, БД жағы толық сақталды, бірақ
+            # Sheets-ке жазылмады — мұны логта анық көрсетеміз, өйткені
+            # қолмен тексеру қажет.
+            logger.exception(
+                "ВНИМАНИЕ: заказ №%s сохранён в БД (accepted), но НЕ записан в Google Sheets "
                 "из-за ошибки. Требуется ручная проверка.",
                 order_number,
             )
+            try:
+                await monitoring.notify_admins(
+                    context.bot,
+                    "🟠 Help Counter Bot — Google Sheets жазылмады\n\n"
+                    f"Қызметкер: {employee_name}\n"
+                    f"Заказ №{order_number}\n\n"
+                    "Диспетчер қабылдады, дерекқорда сақталды, бірақ Google Таблицаға "
+                    "жазылмады. Қолмен тексеріп, керек болса қолмен қосыңыз.",
+                )
+            except Exception:
+                logger.exception("Monitoring: Google Sheets қатесі туралы хабарлау сәтсіз аяқталды")
             await query.edit_message_text(
                 "⚠️ Ошибка сервера при записи в таблицу. Обратитесь к администратору "
                 f"и сообщите номер заказа №{order_number}."
@@ -635,6 +741,8 @@ async def dispatcher_decision_callback(update: Update, context: ContextTypes.DEF
 
 async def handle_unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ответ на сообщения, отличные от фото."""
+    if update.message is None:
+        return
     await update.message.reply_text(
         "📸 Отправьте скриншот заказа вместе с ФИО в подписи."
     )
@@ -673,9 +781,20 @@ def build_application() -> Application:
         CallbackQueryHandler(dispatcher_decision_callback, pattern=r"^(approve|reject):")
     )
 
-    application.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
+    # filters.UpdateType.MESSAGE — ТЕК жаңа хабарламалар (жаңа message
+    # update), ескі (edited_message), channel_post сияқты update түрлерін
+    # өткізбейді. Production логта расталған "AttributeError: 'NoneType'
+    # object has no attribute 'caption'" қатесі дәл осы себептен болған:
+    # бұрын PHOTO filter-і message/edited_message-ді ажыратпайтын, ал
+    # update.edited_message бар, бірақ update.message=None болатын
+    # жағдайда handler шақырылып, message.caption қатесі шыққан.
     application.add_handler(
-        MessageHandler(~filters.PHOTO & ~filters.COMMAND, handle_unsupported)
+        MessageHandler(filters.UpdateType.MESSAGE & filters.PHOTO, handle_screenshot)
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE & ~filters.PHOTO & ~filters.COMMAND, handle_unsupported
+        )
     )
 
     # Monitoring: python-telegram-bot ұстамаған (unhandled) кез келген

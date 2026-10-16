@@ -3,6 +3,7 @@
 и настраивает логирование.
 """
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -61,13 +62,23 @@ LOG_FILE = LOG_DIR / "bot.log"
 
 
 def setup_logging() -> None:
-    """Настраивает логирование одновременно в консоль и в файл."""
+    """Настраивает логирование одновременно в консоль и в файл (с ротацией).
+
+    Ескерту: бұрын `logging.FileHandler` шексіз өсетін бір файлға
+    жазатын (production логта бұл файл бірнеше жүз КБ-қа жеткен еді).
+    Енді `RotatingFileHandler` қолданылады: файл 5 МБ-қа жеткенде
+    автоматты түрде айналдырылады (rotate), ескі 5 көшірме сақталады —
+    диск орны шексіз кетпейді, әрі ескі логтар мүлде жоғалмайды.
+    """
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(LOG_FILE, encoding="utf-8"),
+            file_handler,
         ],
     )
     # Чтобы сторонние библиотеки не выдавали слишком много информации

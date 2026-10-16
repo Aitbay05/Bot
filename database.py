@@ -134,26 +134,45 @@ async def save_pending_order(
 ) -> None:
     """5 пакеттен аз тапсырысты "күтуде" статусымен сақтайды.
 
-    order_number екінші рет kelse (race condition), ескі pending жазба
-    'rejected'/'accepted' болмаса, INSERT сәтсіз аяқталады — бұл жағдайда
-    да DuplicateOrderError көтереміз (bot.py-де сәйкес хабарлама беру үшін).
+    ТҮЗЕТІЛДІ (CRITICAL BUG): order_number — pending_orders кестесінде
+    PRIMARY KEY, ал диспетчер заказды ҚАЙТАРҒАНДА (reject) жол кестеден
+    ӨШІРІЛМЕЙДІ, тек status='rejected' болып қалады. Бұрын осы жағдайда
+    қызметкер сол заказды түзетіп қайта жіберсе, қарапайым INSERT
+    PRIMARY KEY қақтығысынан әрдайым сәтсіз аяқталатын да, "заказ бұрын
+    тіркелген" деген қате хабар беретін — яғни ЕШҚАШАН қайта жіберуге
+    болмайтын. Енді "INSERT ... ON CONFLICT ... DO UPDATE ... WHERE
+    status='rejected'" (атомарлы UPSERT) қолданылады: егер ескі жазба
+    'rejected' болса, ол жаңа деректермен (аты, chat_id, пакет саны,
+    уақыт) қайта 'pending' етіп ашылады. Ал егер ескі жазба әлі де
+    'pending' болса (нағыз қатар келген дубликат) немесе 'accepted'
+    болса, UPDATE орындалмайды (WHERE шарты өтпейді) — бұл жағдайда
+    cursor.rowcount == 0 болады да, бұрынғыдай DuplicateOrderError
+    көтеріледі.
     """
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        try:
-            await db.execute(
-                """
-                INSERT INTO pending_orders
-                    (order_number, employee_name, employee_chat_id, package_count, status, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?)
-                """,
-                (order_number, employee_name, employee_chat_id, package_count, timestamp),
-            )
-            await db.commit()
-        except aiosqlite.IntegrityError as exc:
+        cursor = await db.execute(
+            """
+            INSERT INTO pending_orders
+                (order_number, employee_name, employee_chat_id, package_count, status, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+            ON CONFLICT(order_number) DO UPDATE SET
+                employee_name = excluded.employee_name,
+                employee_chat_id = excluded.employee_chat_id,
+                package_count = excluded.package_count,
+                status = 'pending',
+                created_at = excluded.created_at
+            WHERE pending_orders.status = 'rejected'
+            """,
+            (order_number, employee_name, employee_chat_id, package_count, timestamp),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
             logger.warning(
-                "Race condition: pending заказ №%s қайта сақталмақ болды (%s)", order_number, exc
+                "Pending заказ №%s қайта сақталмақ болды, бірақ ескі жазба "
+                "'pending'/'accepted' статусында тұр — дубликат деп саналды",
+                order_number,
             )
-            raise DuplicateOrderError(order_number) from exc
+            raise DuplicateOrderError(order_number)
     logger.info(
         "Тапсырыс диспетчер қабылдауын күтуде: %s (%s, пакет саны: %s)",
         order_number, employee_name, package_count,

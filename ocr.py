@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 from PIL import Image
 
 from config import OCR_ENGINE, OCR_LANGUAGES, TESSERACT_CMD
-from utils import extract_order_number, extract_package_count
+from utils import extract_order_number_with_confidence, extract_package_count
 
 logger = logging.getLogger(__name__)
 
@@ -101,25 +101,39 @@ async def recognize_order_number(image_path: str) -> Optional[str]:
 
     Оставлена для совместимости со старым функционалом.
     """
-    order_number, _ = await recognize_order_and_packages(image_path)
+    order_number, _, _ = await recognize_order_and_packages(image_path)
     return order_number
 
 
-async def recognize_order_and_packages(image_path: str) -> Tuple[Optional[str], Optional[int]]:
-    """Распознаёт текст на изображении, возвращает номер заказа и количество пакетов.
+async def recognize_order_and_packages(
+    image_path: str,
+) -> Tuple[Optional[str], Optional[int], bool]:
+    """Распознаёт текст на изображении, возвращает номер заказа, количество
+    пакетов и признак уверенности в номере заказа.
 
     Args:
         image_path: Путь к файлу скриншота на диске.
 
     Returns:
-        (order_number, package_count) — оба значения могут быть None, если не найдены.
+        (order_number, package_count, order_number_is_confident):
+        - order_number, package_count — оба могут быть None, если не найдены.
+        - order_number_is_confident=False означает, что номер найден только
+          как "случайная последовательность цифр" без явного слова-метки
+          ("заказ"/"order"/"№"/"#") — OCR мог ошибочно принять за номер
+          заказа какое-то другое число со скриншота (например, цену или
+          телефон). Такие заказы НЕ должны приниматься автоматически —
+          решение об этом принимается на уровне bot.py.
     """
     text = await asyncio.to_thread(_run_ocr_sync, image_path)
-    order_number = extract_order_number(text)
+    order_number, is_confident = extract_order_number_with_confidence(text)
     package_count = extract_package_count(text)
 
     if order_number:
-        logger.info("Номер заказа найден: %s", order_number)
+        logger.info(
+            "Номер заказа найден: %s (уверенность: %s)",
+            order_number,
+            "высокая" if is_confident else "НИЗКАЯ — нет явной метки 'заказ/order/№/#'",
+        )
     else:
         # Записываем фрагмент распознанного текста, чтобы быстро понять причину.
         preview = (text or "").strip().replace("\n", " ")[:200]
@@ -133,4 +147,4 @@ async def recognize_order_and_packages(image_path: str) -> Tuple[Optional[str], 
     else:
         logger.warning("Количество пакетов не найдено — заказ будет обработан в автоматическом режиме.")
 
-    return order_number, package_count
+    return order_number, package_count, is_confident

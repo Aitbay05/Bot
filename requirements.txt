@@ -1,6 +1,10 @@
 python-telegram-bot==21.4
 gspread==6.1.4
 google-auth==2.35.0
+# gspread-тың транзиттік тәуелділігі болатын, енді google_sheet.py
+# ішінде тікелей қолданылады (желі/timeout қателерін retry ету үшін),
+# сондықтан нақты тізімде көрсетілді.
+requests==2.32.3
 pillow==10.4.0
 aiosqlite==0.20.0
 python-dotenv==1.0.1

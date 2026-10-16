@@ -6,18 +6,29 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
+
+# OCR кейде сандарды әріптермен шатастырады: 'O'/'o' <-> '0', 'I'/'l' <-> '1'.
+# Бұл ауыстыруды ТЕК айқын белгіден ("заказ"/"order"/"№"/"#") кейінгі,
+# нөмір болуға тиіс жерде ғана қолданамыз — жалпы мәтінде емес, әйтпесе
+# басқа сөздерді де қате "сан" ретінде тануымыз мүмкін.
+_DIGIT_LIKE = r"[0-9OoIl]"
 
 # Шаблоны, охватывающие варианты "Заказ №254891", "Заказ #254891",
 # "Заказ: 254891", "№254891" и т.п. (проверяются по порядку).
+# ЖОҒАРЫ СЕНІМДІЛІК: осы үлгілердің бірі сәйкес келсе, нөмір айқын
+# белгіден кейін тұр деп есептейміз.
 ORDER_PATTERNS = [
-    re.compile(r"заказ\s*[№#:]*\s*(\d{4,})", re.IGNORECASE),
-    re.compile(r"order\s*[№#:]*\s*(\d{4,})", re.IGNORECASE),
-    re.compile(r"№\s*(\d{4,})"),
-    re.compile(r"#\s*(\d{4,})"),
+    re.compile(rf"заказ\s*[№#:]*\s*({_DIGIT_LIKE}{{4,}})", re.IGNORECASE),
+    re.compile(rf"order\s*[№#:]*\s*({_DIGIT_LIKE}{{4,}})", re.IGNORECASE),
+    re.compile(rf"№\s*({_DIGIT_LIKE}{{4,}})"),
+    re.compile(rf"#\s*({_DIGIT_LIKE}{{4,}})"),
 ]
 
-# В качестве последней попытки: любая последовательность из 5+ цифр в тексте
+# В качестве последней попытки: любая последовательность из 5+ цифр в тексте.
+# ТӨМЕН СЕНІМДІЛІК: бұл жерде "O"/"I"/"l"-ды сандарға ауыстырмаймыз —
+# белгісіз контексттегі кез келген әріпті санға айналдыру тым қауіпті
+# (мүлде қатысы жоқ мәтіннен нөмір "тауып алу" қаупі артады).
 FALLBACK_PATTERN = re.compile(r"\b(\d{5,})\b")
 
 # По формату скриншотов из приложения курьера: "Пакеты (2)" —
@@ -63,6 +74,20 @@ PACKAGE_PATTERNS = [
 ]
 
 
+_OCR_DIGIT_FIX_TABLE = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1"})
+
+
+def _fix_ocr_digit_confusion(raw: str) -> Optional[str]:
+    """'O'/'o' -> '0', 'I'/'l' -> '1' ауыстырады.
+
+    Егер ауыстырудан кейін де нәтиже толықтай сандардан тұрмаса (басқа
+    таңба қалып қойса), None қайтарамыз — жарым-жартылай дұрысталған
+    "нөмірді" қате қабылдағаннан гөрі, мүлде қабылдамаған дұрыс.
+    """
+    fixed = raw.translate(_OCR_DIGIT_FIX_TABLE)
+    return fixed if fixed.isdigit() else None
+
+
 def extract_order_number(text: str) -> Optional[str]:
     """Находит номер заказа в тексте, полученном через OCR.
 
@@ -72,21 +97,44 @@ def extract_order_number(text: str) -> Optional[str]:
     Returns:
         Найденный номер заказа (str) или None, если не найден.
     """
+    order_number, _ = extract_order_number_with_confidence(text)
+    return order_number
+
+
+def extract_order_number_with_confidence(text: str) -> Tuple[Optional[str], bool]:
+    """Находит номер заказа и признак уверенности (high confidence).
+
+    Returns:
+        (order_number, is_high_confidence):
+        - is_high_confidence=True — номер найден рядом с явным словом-меткой
+          ("заказ", "order", "№", "#"), OCR-специфичные опечатки (O/o/I/l)
+          исправлены.
+        - is_high_confidence=False — метка не найдена, номер взят из
+          "любая последовательность цифр" (FALLBACK_PATTERN) — такой номер
+          с большей вероятностью является ошибочным (например, случайное
+          число на скриншоте, сумма, телефон) и не должен приниматься
+          автоматически без проверки диспетчером.
+    """
     if not text:
-        return None
+        return None, False
 
     normalized = text.replace("\n", " ")
 
     for pattern in ORDER_PATTERNS:
         match = pattern.search(normalized)
         if match:
-            return match.group(1)
+            fixed = _fix_ocr_digit_confusion(match.group(1))
+            if fixed:
+                return fixed, True
+            # Сандар мен әріптер шатасып, дұрыстауға болмаса — келесі
+            # үлгіні (pattern) байқап көреміз, бірден fallback-қа өтпейміз.
+            continue
 
     fallback = FALLBACK_PATTERN.search(normalized)
     if fallback:
-        return fallback.group(1)
+        return fallback.group(1), False
 
-    return None
+    return None, False
 
 
 def extract_package_count(text: str) -> Optional[int]:
